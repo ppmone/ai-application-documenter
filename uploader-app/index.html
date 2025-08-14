@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SharePoint Documentation Uploader</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script type="text/javascript" src="https://alcdn.msauth.net/browser/2.15.0/js/msal-browser.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .spinner { border-top-color: #3498db; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <div class="container mx-auto p-4 md:p-8 max-w-4xl">
+        <div class="bg-white rounded-2xl shadow-lg p-8">
+            <h1 class="text-3xl font-bold text-gray-900 mb-2">SharePoint Documentation Uploader</h1>
+            <p class="text-gray-600 mb-8">This tool uploads your solution documentation to a SharePoint site as a series of pages.</p>
+
+            <!-- Step 1: Authentication -->
+            <div id="step-auth" class="step">
+                <h2 class="text-xl font-semibold mb-4 border-b pb-2">Step 1: Authenticate with Microsoft 365</h2>
+                <div class="bg-yellow-50 border border-yellow-200 text-yellow-800 p-4 rounded-lg mb-4">
+                    <p class="font-bold">Important Configuration Note:</p>
+                    <p>The Redirect URI for this application is set to <strong>http://localhost:8080</strong>. You must add this exact URI to your App Registration in the Azure Portal under 'Authentication' > 'Single-page application'.</p>
+                </div>
+                <div class="bg-blue-50 border border-blue-200 text-blue-800 p-4 rounded-lg mb-4">
+                    <p>You'll need to sign in with an account that has permissions to create pages on the target SharePoint site.</p>
+                </div>
+                <input type="text" id="clientId" placeholder="Enter your Application (client) ID" class="w-full p-3 border rounded-lg mb-4 focus:ring-2 focus:ring-blue-500" value="">
+                <button id="signInButton" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors">Sign In & Grant Consent</button>
+                <div id="authStatus" class="mt-4 text-center"></div>
+            </div>
+
+            <!-- Step 2: SharePoint Site Info -->
+            <div id="step-site" class="step hidden">
+                <h2 class="text-xl font-semibold mb-4 border-b pb-2">Step 2: Provide SharePoint Site Details</h2>
+                <input type="text" id="sharepointHost" placeholder="e.g., yourtenant.sharepoint.com" class="w-full p-3 border rounded-lg mb-4 focus:ring-2 focus:ring-blue-500">
+                <input type="text" id="sharepointSite" placeholder="e.g., /sites/MyProjectSite" class="w-full p-3 border rounded-lg mb-4 focus:ring-2 focus:ring-blue-500">
+                <button id="connectSiteButton" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors">Connect to Site</button>
+                <div id="siteStatus" class="mt-4 text-center"></div>
+            </div>
+
+            <!-- Step 3: Upload Data -->
+            <div id="step-upload" class="step hidden">
+                <h2 class="text-xl font-semibold mb-4 border-b pb-2">Step 3: Upload Documentation File</h2>
+                <div class="bg-gray-50 border border-dashed border-gray-300 p-8 rounded-lg text-center mb-4">
+                    <label for="jsonFile" class="block mb-2">Upload the `solution-data.json` file you generated.</label>
+                    <input type="file" id="jsonFile" accept=".json" class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"/>
+                </div>
+                <button id="uploadButton" class="w-full bg-green-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-400" disabled>Upload to SharePoint</button>
+            </div>
+            
+            <!-- Step 4: Progress & Results -->
+            <div id="step-progress" class="step hidden">
+                 <h2 class="text-xl font-semibold mb-4 border-b pb-2">Processing...</h2>
+                 <div class="flex items-center justify-center my-4">
+                    <div class="spinner animate-spin rounded-full h-12 w-12 border-4 border-gray-200 border-t-blue-500"></div>
+                 </div>
+                 <div id="progressLog" class="bg-gray-900 text-white font-mono text-sm p-4 rounded-lg h-64 overflow-y-auto"></div>
+            </div>
+
+        </div>
+    </div>
+
+    <script type="module">
+        // MSAL configuration
+        let msalInstance = null;
+        let graphClient = null;
+        let siteId = null;
+        let solutionData = null;
+
+        const msalConfig = {
+            auth: {
+                clientId: "", // To be filled from input
+                authority: "https://login.microsoftonline.com/common",
+                // IMPORTANT: This redirectUri MUST match exactly what you configure in the Azure App Registration.
+                // Using a stable localhost URI is recommended for local development.
+                redirectUri: "http://localhost:8080",
+            },
+            cache: {
+                cacheLocation: "sessionStorage",
+                storeAuthStateInCookie: false,
+            }
+        };
+
+        const loginRequest = {
+            scopes: ["User.Read", "Sites.ReadWrite.All"]
+        };
+
+        // UI Elements
+        const signInButton = document.getElementById('signInButton');
+        const connectSiteButton = document.getElementById('connectSiteButton');
+        const uploadButton = document.getElementById('uploadButton');
+        const jsonFileInput = document.getElementById('jsonFile');
+        const clientIdInput = document.getElementById('clientId');
+        
+        const authStatus = document.getElementById('authStatus');
+        const siteStatus = document.getElementById('siteStatus');
+        const progressLog = document.getElementById('progressLog');
+
+        // --- AUTHENTICATION LOGIC ---
+        signInButton.addEventListener('click', async () => {
+            const clientId = clientIdInput.value;
+            if (!clientId) {
+                alert("Please enter an Application (client) ID.");
+                return;
+            }
+            msalConfig.auth.clientId = clientId;
+            msalInstance = new msal.PublicClientApplication(msalConfig);
+            
+            authStatus.innerHTML = `<p class="text-gray-600">Attempting to sign in...</p>`;
+            try {
+                await msalInstance.loginPopup(loginRequest);
+                const accounts = msalInstance.getAllAccounts();
+                if (accounts.length > 0) {
+                    authStatus.innerHTML = `<p class="text-green-600 font-semibold">Successfully signed in as ${accounts[0].username}</p>`;
+                    document.getElementById('step-auth').classList.add('hidden');
+                    document.getElementById('step-site').classList.remove('hidden');
+                }
+            } catch (error) {
+                console.error(error);
+                authStatus.innerHTML = `<p class="text-red-600">Error during sign-in. Check console for details.</p>`;
+            }
+        });
+
+        // --- GRAPH CLIENT HELPER ---
+        async function getGraphClient() {
+            if (graphClient) return graphClient;
+
+            const account = msalInstance.getAllAccounts()[0];
+            const response = await msalInstance.acquireTokenSilent({ ...loginRequest, account });
+            
+            const client = MicrosoftGraph.Client.init({
+                authProvider: (done) => {
+                    done(null, response.accessToken);
+                }
+            });
+            graphClient = client;
+            return client;
+        }
+        
+        // This script tag needs to be added to load the Graph SDK
+        const graphScript = document.createElement('script');
+        graphScript.src = "https://cdn.jsdelivr.net/npm/@microsoft/microsoft-graph-client/lib/graph-js-sdk.js";
+        document.head.appendChild(graphScript);
+
+
+        // --- SITE CONNECTION LOGIC ---
+        connectSiteButton.addEventListener('click', async () => {
+            const hostName = document.getElementById('sharepointHost').value;
+            const sitePath = document.getElementById('sharepointSite').value;
+
+            if (!hostName || !sitePath) {
+                alert("Please provide both SharePoint host and site path.");
+                return;
+            }
+
+            siteStatus.innerHTML = `<p class="text-gray-600">Connecting to SharePoint site...</p>`;
+            try {
+                const client = await getGraphClient();
+                const site = await client.api(`/sites/${hostName}:${sitePath}`).get();
+                siteId = site.id;
+                siteStatus.innerHTML = `<p class="text-green-600 font-semibold">Successfully connected to site: ${site.displayName}</p>`;
+                document.getElementById('step-site').classList.add('hidden');
+                document.getElementById('step-upload').classList.remove('hidden');
+            } catch (error) {
+                console.error(error);
+                siteStatus.innerHTML = `<p class="text-red-600">Error connecting to site. Check console for details.</p>`;
+            }
+        });
+        
+        // --- FILE UPLOAD LOGIC ---
+        jsonFileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        solutionData = JSON.parse(e.target.result);
+                        uploadButton.disabled = false;
+                    } catch (error) {
+                        alert("Invalid JSON file.");
+                        uploadButton.disabled = true;
+                    }
+                };
+                reader.readAsText(file);
+            }
+        });
+
+        uploadButton.addEventListener('click', async () => {
+             if (!solutionData) {
+                alert("No solution data loaded.");
+                return;
+            }
+            document.getElementById('step-upload').classList.add('hidden');
+            document.getElementById('step-progress').classList.remove('hidden');
+            await createDocumentationPages();
+        });
+
+        // --- PAGE CREATION LOGIC ---
+        function logMessage(message, isError = false) {
+            const p = document.createElement('p');
+            p.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            if(isError) p.classList.add('text-red-400');
+            progressLog.appendChild(p);
+            progressLog.scrollTop = progressLog.scrollHeight;
+        }
+
+        async function createOrUpdatePage(title, contentHtml) {
+            const client = await getGraphClient();
+            const pageData = {
+                name: `${title}.aspx`,
+                title: title,
+                publishingState: { level: "published" },
+                webParts: [{
+                    type: "microsoft.graph.textWebPart",
+                    'instanceId': 'a1b2c3d4-e5f6-a1b2-c3d4-e5f6a1b2c3d4', // A static GUID is fine here
+                    'innerHTML': contentHtml
+                }]
+            };
+
+            try {
+                logMessage(`Creating page: '${title}'...`);
+                // Check if page exists
+                const searchUrl = `/sites/${siteId}/pages/microsoft.graph.sitePage?$filter=name eq '${title}.aspx'`;
+                const existingPages = await client.api(searchUrl).get();
+
+                if (existingPages.value.length > 0) {
+                    // Update existing page
+                    const pageId = existingPages.value[0].id;
+                    logMessage(`Page '${title}' already exists. Updating it.`);
+                    await client.api(`/sites/${siteId}/pages/${pageId}/microsoft.graph.publish`).post();
+                    // Note: A real update would involve patching the webparts, which is more complex.
+                    // For this app, we'll just re-publish. A more robust solution would delete and recreate or patch.
+                } else {
+                    // Create new page
+                    await client.api(`/sites/${siteId}/pages`).post(pageData);
+                }
+                logMessage(`Successfully processed page: '${title}'.`);
+                return true;
+            } catch (error) {
+                logMessage(`Failed to create page '${title}': ${error.message}`, true);
+                console.error(error);
+                return false;
+            }
+        }
+        
+        function generateOverviewMarkdown(data) {
+            let md = `<h1>${data.projectName}</h1>\n`;
+            md += `<p>${data.description}</p>\n`;
+            md += `<h2>Key Features</h2>\n<ul>\n`;
+            data.keyFeatures.forEach(f => md += `<li>${f}</li>\n`);
+            md += `</ul>\n`;
+            return md;
+        }
+        
+        function generateTechStackMarkdown(data) {
+             let md = `<h1>Technology Stack</h1>\n`;
+             md += `<h2>Frontend</h2>\n<p>${data.frontend.language} with ${data.frontend.framework}</p>\n`;
+             md += `<h3>Key Dependencies</h3>\n<table><thead><tr><th>Name</th><th>Purpose</th></tr></thead><tbody>\n`;
+             data.frontend.keyDependencies.forEach(d => md += `<tr><td><code>${d.name}</code></td><td>${d.purpose}</td></tr>\n`);
+             md += `</tbody></table>\n`;
+             
+             md += `<h2>Backend</h2>\n<p>${data.backend.language} with ${data.backend.framework}</p>\n`;
+             md += `<h3>Key Dependencies</h3>\n<table><thead><tr><th>Name</th><th>Purpose</th></tr></thead><tbody>\n`;
+             data.backend.keyDependencies.forEach(d => md += `<tr><td><code>${d.name}</code></td><td>${d.purpose}</td></tr>\n`);
+             md += `</tbody></table>\n`;
+
+             md += `<h2>Infrastructure</h2>\n<p><strong>Tool:</strong> ${data.infrastructure.tool}</p>\n<p>${data.infrastructure.description}</p>\n`;
+             return md;
+        }
+        
+        function generateArchitectureMarkdown(data) {
+            let md = `<h1>Solution Architecture</h1>\n`;
+            md += `<h2>Frontend Components</h2>\n<table><thead><tr><th>Component</th><th>Purpose</th></tr></thead><tbody>\n`;
+            data.frontendComponents.forEach(c => md += `<tr><td><code>${c.name}</code></td><td>${c.purpose}</td></tr>\n`);
+            md += `</tbody></table>\n`;
+
+            md += `<h2>Backend Services</h2>\n<table><thead><tr><th>Service/File</th><th>Purpose</th></tr></thead><tbody>\n`;
+            data.backendServices.forEach(s => md += `<tr><td><code>${s.name}</code></td><td>${s.purpose}</td></tr>\n`);
+            md += `</tbody></table>\n`;
+            return md;
+        }
+
+        function generateSecurityMarkdown(data) {
+            let md = `<h1>Authentication & Security</h1>\n`;
+            md += `<h2>User Authentication</h2>\n`;
+            md += `<p><strong>Method:</strong> ${data.userAuthentication.method}</p>\n`;
+            md += `<p><strong>Implementation:</strong> ${data.userAuthentication.implementation}</p>\n`;
+            md += `<p><strong>App Registration Name:</strong> ${data.userAuthentication.appRegistrationName}</p>\n`;
+            md += `<p><strong>Configuration File:</strong> <code>${data.userAuthentication.keyConfigFile}</code></p>\n`;
+
+            md += `<h2>Backend Authentication (Service-to-Service)</h2>\n`;
+            md += `<p><strong>Method:</strong> ${data.backendAuthentication.method}</p>\n`;
+            md += `<p><strong>Implementation:</strong> ${data.backendAuthentication.implementation}</p>\n`;
+            md += `<p><strong>Key Vault Usage:</strong> ${data.backendAuthentication.keyVaultUsage}</p>\n`;
+            
+            md += `<h2>Multi-Tenancy Data Strategy</h2>\n`;
+            md += `<p>${data.multiTenancy.strategy}</p>\n`;
+            return md;
+        }
+
+        async function createDocumentationPages() {
+            logMessage("Starting documentation upload process...");
+            
+            const pagesToCreate = [
+                { title: "Project Overview", content: generateOverviewMarkdown(solutionData.projectOverview) },
+                { title: "Technology Stack", content: generateTechStackMarkdown(solutionData.technologyStack) },
+                { title: "Architecture", content: generateArchitectureMarkdown(solutionData.architecture) },
+                { title: "Security and Authentication", content: generateSecurityMarkdown(solutionData.security) },
+            ];
+
+            for (const page of pagesToCreate) {
+                // The Graph API expects HTML content for text web parts.
+                const htmlContent = marked.parse(page.content.replace(/[\r\n]+/g, '\n'));
+                await createOrUpdatePage(page.title, htmlContent);
+            }
+
+            logMessage("Process complete!");
+            const siteUrl = `https://${document.getElementById('sharepointHost').value}${document.getElementById('sharepointSite').value}`;
+            progressLog.innerHTML += `<p class="text-green-400 font-bold mt-4">All pages have been created! <a href="${siteUrl}" target="_blank" class="underline">View your SharePoint site</a>.</p>`;
+        }
+    </script>
+</body>
+</html>
